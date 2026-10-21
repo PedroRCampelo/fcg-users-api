@@ -1,3 +1,4 @@
+using FCG.Contracts;
 using FCG.Users.Application.Interfaces;
 using FCG.Users.Infrastructure.Messaging;
 using FCG.Users.Infrastructure.Persistence;
@@ -32,10 +33,7 @@ public static class DependencyInjection
 
     private static void AdicionarMensageria(IServiceCollection services, IConfiguration configuration)
     {
-        var rabbit = configuration.GetSection(RabbitMqSettings.SectionName).Get<RabbitMqSettings>() ?? new RabbitMqSettings();
-
-        if (string.IsNullOrWhiteSpace(rabbit.Username) || string.IsNullOrWhiteSpace(rabbit.Password))
-            throw new InvalidOperationException("Credenciais do RabbitMQ ausentes. Defina RabbitMq__Username e RabbitMq__Password.");
+        var rabbit = RabbitMqSettings.Carregar(configuration);
 
         services.AddMassTransit(bus =>
         {
@@ -56,7 +54,19 @@ public static class DependencyInjection
                     host.Password(rabbit.Password);
                 });
 
-                cfg.ConfigureEndpoints(context);
+                // O publicador declara a fila do consumidor. Sem isso, um evento publicado antes de o
+                // NotificationsAPI subir pela primeira vez cairia numa exchange sem nenhuma fila ligada
+                // e seria descartado. Com a fila já existindo, a mensagem fica retida até alguém consumir.
+                //
+                // DeployTopologyOnly: o bus só implanta a topologia (exchange, fila e binding) e não consome.
+                // Sem isso, este serviço abriria um consumidor na fila do Notifications e despejaria as
+                // mensagens na fila _skipped. Vale para o bus inteiro, então o UsersAPI só publica: se um dia
+                // ele precisar consumir algo, essa declaração deve sair para um bus de implantação separado.
+                cfg.DeployTopologyOnly = true;
+                cfg.ReceiveEndpoint(rabbit.Queues.NotificationsUserCreated, endpoint =>
+                {
+                    endpoint.Bind<UserCreatedEvent>();
+                });
             });
         });
     }
